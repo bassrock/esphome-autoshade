@@ -1,0 +1,316 @@
+# =============================================================================
+# AUTOSHADE — ESP32-S3 (Hosyond N16R8 DevKitC clone) as USB host
+#
+#   ESP32-S3  --USB host, CDC-ACM 115200-->  ATmega16U2  --UART-->  ATmega328P
+#
+# The shade board runs avr/autoshade_dumb.ino, which holds NO policy: it runs
+# step trains, counts steps, reports raw button bits and raw ADC counts, and
+# writes literal text to the LCD. Everything that decides anything — travel,
+# speed, what a button does, what the screen says, the schedule, homing,
+# position across reboots — is in this file.
+#
+# THIS FILE REPLACES the earlier autoshade.yaml (ESP32-S3-USB-OTG kit) and
+# autoshade-s3-devkit.yaml. Delete those; keep only this one.
+#
+# -----------------------------------------------------------------------------
+# WIRING — one cable, nothing else.
+#
+#   ESP32-S3 native USB-C port  ==USB-C to USB-B cable==>  shade board USB-B
+#
+# The S3's USB-OTG is hardwired to GPIO19 (D-) and GPIO20 (D+), and those run
+# to the native USB-C port. Your cable carries them straight to the '16U2.
+#
+# THE TWO USB-C PORTS ARE NOT INTERCHANGEABLE:
+#   * the one marked COM / UART goes through a USB-serial chip — use it for
+#     flashing, for logs, and to power the ESP. A 5 V charger lives here.
+#   * the one marked USB is the native port — this is where your cable goes.
+#     Nothing else is ever plugged in here.
+#
+# -----------------------------------------------------------------------------
+# THE ONE THING TO WATCH: VBUS
+#
+# In host mode the ESP is supposed to supply 5 V out of its USB port. A DevKitC
+# clone will not — its VBUS pin is wired to RECEIVE power, not send it. Whether
+# that matters depends on whether the shade board's '16U2 will enumerate
+# without seeing 5 V from the host. It has its own power from the 12 V supply
+# at J5, so it may be perfectly happy. This is untested.
+#
+# HOW TO TELL: the "Controller Link" sensor below, and the ESPHome log. If the
+# log shows the USB host stack starting but never enumerating a device, VBUS is
+# the reason — not the cable, not this config.
+#
+# IF IT TURNS OUT YOU NEED VBUS: the fix is to stop using the USB-C port and
+# feed the four USB signals in by hand instead — a USB Type-A female
+# screw-terminal breakout wired D- to GPIO19, D+ to GPIO20, VBUS to the 5V pin,
+# GND to GND, then a plain USB A-to-B cable to the shade board. No config
+# change is needed for that; D+/D- are the same two pins either way.
+#
+# Travel scaling, unchanged from the original firmware: 2124 steps per foot.
+#     travel_steps = drop_in_feet * 2124
+# =============================================================================
+
+esphome:
+  name: autoshade
+  friendly_name: Patio Shades
+
+esp32:
+  # `variant` is preferred over `board` in current ESPHome. N16R8 = 16 MB
+  # flash, 8 MB PSRAM. PSRAM is deliberately not enabled — nothing here needs
+  # it, and octal PSRAM misconfiguration is a common boot-loop cause.
+  variant: esp32s3
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+
+external_components:
+  # Pulled straight from GitHub - nothing to copy into /config/esphome.
+  # refresh: 0s re-fetches on every build, which is what you want while the
+  # component is still changing. Drop it (default 1day) once it is stable.
+  - source: github://YOUR-USERNAME/esphome-autoshade@main
+    components: [autoshade_link]
+    refresh: 0s
+
+  # Local alternative, if you would rather keep the files in
+  # /config/esphome/components/autoshade_link/ :
+  # - source:
+  #     type: local
+  #     path: components
+
+logger:
+  level: INFO
+  # Out the UART bridge (the COM port). The native USB peripheral is the host.
+  hardware_uart: UART0
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "Autoshade Fallback"
+
+captive_portal:
+
+time:
+  - platform: homeassistant
+    id: ha_time
+
+sun:
+  latitude: 37.0058
+  longitude: -121.5683      # set to your actual location
+  on_sunset:
+    - elevation: -2.0
+      then:
+        - script.execute: all_down
+
+# -----------------------------------------------------------------------------
+# USB host
+#
+# No board control pins here — unlike the ESP32-S3-USB-OTG kit, this board has
+# no USB mux and no VBUS switch. D+/D- go straight to the breakout and VBUS is
+# hard-wired from the 5 V pin, so the jack is live the moment the board powers
+# up. That also means there is no way to switch it off in software.
+#
+# First boot: leave vid/pid at 0 so any CDC-ACM device matches, read the log to
+# see what the '16U2 enumerates as, then pin those values.
+# -----------------------------------------------------------------------------
+
+usb_host:
+
+usb_uart:
+  - type: cdc_acm
+    vid: 0
+    pid: 0
+    channels:
+      - id: avr_uart
+        baud_rate: 115200
+        buffer_size: 1024
+
+autoshade_link:
+  id: avr
+  uart_id: avr_uart
+  update_interval: 500ms
+  supply_voltage:
+    name: Shade Controller 12V
+    id: v_supply
+  battery_voltage:
+    name: Shade Controller Backup Battery
+
+# -----------------------------------------------------------------------------
+# Everything below is identical to autoshade.yaml.
+# -----------------------------------------------------------------------------
+
+cover:
+  - platform: autoshade_link
+    id: shade_1
+    name: Shade 1
+    motor: 1
+    travel_steps: 14868     # 7.0 ft — replace with your measured value
+    max_speed: 400
+    acceleration: 400
+    hold: brake
+    home_overrun: 150
+
+  - platform: autoshade_link
+    id: shade_2
+    name: Shade 2
+    motor: 2
+    travel_steps: 14868
+    hold: brake
+    home_overrun: 150
+
+  - platform: autoshade_link
+    id: shade_3
+    name: Shade 3
+    motor: 3
+    travel_steps: 14868
+    hold: brake
+    home_overrun: 150
+
+  - platform: autoshade_link
+    id: shade_4
+    name: Shade 4
+    motor: 4
+    travel_steps: 14868
+    hold: brake
+    home_overrun: 150
+
+  - platform: autoshade_link
+    id: shade_5
+    name: Shade 5
+    motor: 5
+    travel_steps: 14868
+    hold: brake
+    home_overrun: 150
+
+binary_sensor:
+  # Is the shade board actually talking to us? This is the first thing to look
+  # at if nothing works — it goes off after 5 s of silence on the link.
+  - platform: template
+    name: "Controller Link"
+    device_class: connectivity
+    lambda: 'return id(avr)->is_linked();'
+
+  - platform: autoshade_link
+    button: up
+    name: Panel Up
+    on_press:
+      - script.execute: all_up
+
+  - platform: autoshade_link
+    button: down
+    name: Panel Down
+    on_press:
+      - script.execute: all_down
+
+  - platform: autoshade_link
+    button: select
+    name: Panel Select
+    on_press:
+      - script.execute: stop_all
+
+  - platform: autoshade_link
+    button: left
+    name: Panel Left
+
+  - platform: autoshade_link
+    button: right
+    name: Panel Right
+
+script:
+  - id: all_up
+    mode: restart
+    then:
+      - cover.open: shade_1
+      - cover.open: shade_2
+      - cover.open: shade_3
+      - cover.open: shade_4
+      - cover.open: shade_5
+
+  - id: all_down
+    mode: restart
+    then:
+      - cover.close: shade_1
+      - cover.close: shade_2
+      - cover.close: shade_3
+      - cover.close: shade_4
+      - cover.close: shade_5
+
+  - id: stop_all
+    mode: restart
+    then:
+      - lambda: 'id(avr)->send_stop(0);'
+
+button:
+  - platform: template
+    name: "Re-home All Shades"
+    on_press:
+      - lambda: |-
+          id(shade_1)->start_home();
+          id(shade_2)->start_home();
+          id(shade_3)->start_home();
+          id(shade_4)->start_home();
+          id(shade_5)->start_home();
+
+interval:
+  - interval: 2s
+    then:
+      - lambda: |-
+          static std::string last0, last1;
+          if (!id(avr)->is_linked()) return;
+
+          const std::vector<esphome::cover::Cover *> shades = {
+            id(shade_1), id(shade_2), id(shade_3), id(shade_4), id(shade_5)
+          };
+
+          int up = 0, dn = 0, mid = 0, moving = 0;
+          for (size_t i = 0; i < shades.size(); i++) {
+            auto *s = shades[i];
+            if (s->current_operation != esphome::cover::COVER_OPERATION_IDLE && moving == 0)
+              moving = (int) i + 1;
+            if (s->position > 0.98f) up++;
+            else if (s->position < 0.02f) dn++;
+            else mid++;
+          }
+
+          char l0[20], l1[20];
+          if (moving > 0) {
+            snprintf(l0, sizeof(l0), "Moving shade %d", moving);
+          } else if (id(ha_time).now().is_valid()) {
+            snprintf(l0, sizeof(l0), "%s", id(ha_time).now().strftime("%a %H:%M").c_str());
+          } else {
+            snprintf(l0, sizeof(l0), "AUTOSHADE");
+          }
+          snprintf(l1, sizeof(l1), "Up:%d Dn:%d Mid:%d", up, dn, mid);
+
+          if (last0 != l0) { last0 = l0; id(avr)->send_lcd(0, last0); }
+          if (last1 != l1) { last1 = l1; id(avr)->send_lcd(1, last1); }
+
+          static uint8_t lastbl = 0xFF;
+          uint8_t bl = moving > 0 ? 0x3 : (id(v_supply).state < 9.0f ? 0x1 : 0x2);
+          if (bl != lastbl) { lastbl = bl; id(avr)->send_backlight(bl); }
+
+# -----------------------------------------------------------------------------
+# Notes
+#
+# * The shade board keeps no EEPROM. Position lives in this ESP's flash and is
+#   pushed back with X whenever the board resets — which happens every time the
+#   USB port is opened, because DTR pulses the '328P reset through C8/R37. That
+#   is expected and handled, not a fault.
+#
+# * Nothing can move a shade unless 12 V is present at J5: that is where the
+#   DRV8871 VM rails come from. For bench work, leave 12 V unplugged and the
+#   motors are physically unable to turn no matter what the software does.
+#
+# * Wrong direction on a shade means swapping one coil pair at its terminal
+#   block. There is no software invert — direction is a property of the wiring.
+#
+# * PSRAM is deliberately not enabled. Nothing here needs it, and misconfigured
+#   octal PSRAM is a common boot-loop cause on N16R8 boards.
+# -----------------------------------------------------------------------------
