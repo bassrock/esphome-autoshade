@@ -279,7 +279,7 @@ number:
     min_value: 25
     max_value: 150
     step: 5
-    initial_value: 90
+    initial_value: 75        # tested with 1/8 microstep (which caps near 97)
     optimistic: true
     restore_value: true
     on_value:
@@ -315,7 +315,7 @@ number:
     min_value: 0.4
     max_value: 1.6
     step: 0.1
-    initial_value: 1.2
+    initial_value: 1.6       # tested: 0.9 A stalls lifting; 1.6 is quiet with margin
     optimistic: true
     restore_value: true
     on_value:
@@ -364,7 +364,7 @@ select:
       - 1/4 microstep
       - 1/8 microstep
       - Full step
-    initial_option: Half step
+    initial_option: 1/8 microstep   # tested quietest; half/full step are loud
     optimistic: true
     restore_value: true
     on_value:

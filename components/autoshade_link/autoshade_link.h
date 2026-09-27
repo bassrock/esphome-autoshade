@@ -124,9 +124,9 @@ class AutoShadeLink : public PollingComponent, public uart::UARTDevice {
   void resync_positions_();
   void finish_avr_update_();
   void send_drive_();
-  uint8_t drive_div_{2};
-  bool drive_pwm_{false};
-  uint16_t drive_ma_{1200};
+  uint8_t drive_div_{8};  // 1/8 sine PWM at 1.6 A: quietest on a 23HS22-2804S
+  bool drive_pwm_{true};
+  uint16_t drive_ma_{1600};
   uint16_t motor_mohm_{920};  // 23HS22-2804S
   uint16_t motor_uh_{2680};
   uint16_t motor_mvs_{318};
