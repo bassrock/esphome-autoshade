@@ -326,7 +326,8 @@ number:
   # turning, this is too low. To measure: 12 V off, meter across one coil pair
   # at the board's terminal block, minus 0.92 (the motor's own winding).
   # 18 AWG is ~0.0064 ohm/ft per conductor, so 2 x run_ft x 0.0064 + ~0.1 for
-  # terminals. Runs here are ~15-40 ft (130 ft over 5 shades): 0.3-0.6 ohm.
+  # terminals. Measured here: every coil pair reads 1.2-1.4 ohm at the board,
+  # so 0.3-0.5 ohm of wiring.
   - platform: template
     id: wiring_resistance
     name: Motor Wiring Resistance
@@ -337,7 +338,7 @@ number:
     min_value: 0
     max_value: 10
     step: 0.1
-    initial_value: 0.5
+    initial_value: 0.4
     optimistic: true
     restore_value: true
     on_value:
