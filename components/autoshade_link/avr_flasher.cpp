@@ -22,10 +22,14 @@ static const uint8_t STK_LOAD_ADDRESS = 0x55;
 static const uint8_t STK_PROG_PAGE = 0x64;
 static const uint8_t STK_READ_PAGE = 0x74;
 
-static const uint32_t SYNC_WINDOW_MS = 2500;  // Optiboot listens ~1 s after reset
-// Longer than a USB round trip, so a GET_SYNC is never resent while the reply
-// to the last one is still on its way (avrdude waits 500 ms).
-static const uint32_t SYNC_RETRY_MS = 300;
+static const uint32_t SYNC_WINDOW_MS = 2500;
+// This board's Optiboot (4.x) blinks the LED 3 times (~375 ms) after reset
+// before it reads the UART. Its receive buffer holds 2 bytes, so anything
+// more sent during the blink overruns, and a GET_SYNC that loses its 0x20
+// makes verifySpace() bail straight to the sketch. So: say nothing until the
+// blink is over, then send one GET_SYNC at a time.
+static const uint32_t SYNC_FIRST_MS = 500;
+static const uint32_t SYNC_RETRY_MS = 250;  // it answers at once once listening
 static const uint32_t REPLY_TIMEOUT_MS = 500;
 static const uint32_t SETTLE_MS = 100;  // well inside Optiboot's ~1 s watchdog
 
@@ -58,6 +62,8 @@ void AvrFlasher::loop() {
       this->fail_("bootloader did not answer (no Optiboot, or reset failed)");
       return;
     }
+    if (now - this->started_ms_ < SYNC_FIRST_MS)
+      return;
     // Not while half a reply is in: resending would throw its tail away.
     if (!this->waiting_ || (this->reply_len_ == 0 && now - this->sent_ms_ >= SYNC_RETRY_MS)) {
       const uint8_t cmd[] = {STK_GET_SYNC, CRC_EOP};
