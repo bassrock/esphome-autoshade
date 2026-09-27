@@ -130,7 +130,7 @@ class AutoShadeLink : public PollingComponent, public uart::UARTDevice {
   uint16_t motor_mohm_{920};  // 23HS22-2804S
   uint16_t motor_uh_{2680};
   uint16_t motor_mvs_{318};
-  uint16_t wiring_mohm_{1500};
+  uint16_t wiring_mohm_{500};  // ~30 ft of 18 AWG, there and back
   bool drive_dirty_{false};   // board may not have our drive settings yet
   bool drive_set_{false};     // set_drive() called at least once
 #ifdef AUTOSHADE_LINK_USB
