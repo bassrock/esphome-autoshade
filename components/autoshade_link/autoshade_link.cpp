@@ -137,9 +137,13 @@ void AutoShadeLink::set_drive_current(float amps) {
 }
 
 void AutoShadeLink::send_drive_() {
+  // Everything the PWM voltage has to push the current through: the winding,
+  // the cable and the DRV8871's high- plus low-side switches (~0.565 ohm).
+  static const uint16_t DRV8871_RDSON_MOHM = 565;
+  const uint32_t mohm = (uint32_t) this->motor_mohm_ + this->wiring_mohm_ + DRV8871_RDSON_MOHM;
   char out[64];
   snprintf(out, sizeof(out), "D %u %u %u %u %u %u", this->drive_div_, this->drive_pwm_ ? 1 : 0,
-           this->drive_ma_, this->motor_mohm_, this->motor_mvs_, this->motor_uh_);
+           this->drive_ma_, (unsigned) (mohm > 60000 ? 60000 : mohm), this->motor_mvs_, this->motor_uh_);
   ESP_LOGI(TAG, "-> %s", out);
   this->drive_dirty_ = false;
   this->send_line_(out);

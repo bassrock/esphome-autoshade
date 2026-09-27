@@ -321,6 +321,26 @@ number:
     on_value:
       - lambda: 'id(avr)->set_drive_current(x);'
 
+  # Cable resistance to the motors, per winding (there and back). The PWM
+  # modes size their duty for motor + cable + driver, so if they hum without
+  # turning, this is too low. To measure: 12 V off, meter across one coil pair
+  # at the board's terminal block, minus 0.92 (the motor's own winding).
+  - platform: template
+    id: wiring_resistance
+    name: Motor Wiring Resistance
+    entity_category: config
+    icon: mdi:omega
+    unit_of_measurement: Ω
+    mode: box
+    min_value: 0
+    max_value: 10
+    step: 0.1
+    initial_value: 1.5
+    optimistic: true
+    restore_value: true
+    on_value:
+      - lambda: 'id(avr)->set_wiring_resistance(x);'
+
 select:
   # How the board drives the windings (board firmware 3.4+). Applied as soon
   # as every shade is at rest. Compare by ear:

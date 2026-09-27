@@ -70,6 +70,15 @@ class AutoShadeLink : public PollingComponent, public uart::UARTDevice {
     this->drive_dirty_ = true;
   }
 
+  /// Resistance of the cable run to the motors, per winding (both wires).
+  /// Measure a coil pair at the board's terminals with 12 V off and subtract
+  /// the motor's own resistance. The PWM duty is sized for motor + cable +
+  /// the DRV8871's own ~0.57 ohm, so too low a figure starves the motor.
+  void set_wiring_resistance(float ohms) {
+    this->wiring_mohm_ = (uint16_t) (ohms * 1000.0f);
+    this->drive_dirty_ = true;
+  }
+
   /// Speed / acceleration for every cover, from the next move on. Full steps.
   void set_all_speed(uint16_t sps);
   void set_all_accel(uint16_t acc);
@@ -121,6 +130,7 @@ class AutoShadeLink : public PollingComponent, public uart::UARTDevice {
   uint16_t motor_mohm_{920};  // 23HS22-2804S
   uint16_t motor_uh_{2680};
   uint16_t motor_mvs_{318};
+  uint16_t wiring_mohm_{1500};
   bool drive_dirty_{false};   // board may not have our drive settings yet
   bool drive_set_{false};     // set_drive() called at least once
 #ifdef AUTOSHADE_LINK_USB
