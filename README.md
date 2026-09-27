@@ -92,6 +92,9 @@ the LCD text, the sunset schedule and the supply-voltage sensors.
 | `battery_voltage` | — | sensor; 9 V backup, `scale` defaults to `0.009872` |
 | `usb_channel` | — | the `usb_uart` channel id; needed for board firmware updates |
 | `avr_firmware` | bundled | Intel HEX to flash; defaults to `firmware/autoshade_dumb.hex` |
+| `motor_resistance` | `0.92` | ohms per winding, for the PWM drive modes |
+| `motor_inductance` | `2.68` | mH per winding |
+| `motor_back_emf` | `0.318` | V per rad/s |
 
 ### Updating the board firmware from the ESP
 
@@ -103,6 +106,18 @@ over the same USB link (STK500v1), all without a laptop. It is refused while a
 shade moves. `board_version()`, `bundled_version()` and `avr_update_status()`
 feed text sensors. A failed update never touches the bootloader; retry, or
 flash from Arduino IDE.
+
+### Drive modes (board firmware 3.4+)
+
+The PCA9685s are PWM chips, so a DRV8871 input can be pulsed rather than
+only switched. `id(avr)->set_drive(div, pwm)` picks 1, 2, 4 or 8 microsteps
+per full step, with on/off coils (1 and 2 only) or sine PWM.
+`set_drive_current(amps)` sets the PWM peak current. The DRV8871s cap current
+near 1.6 A whatever you ask for. The board works out the duty from the winding
+model (`motor_resistance`, `motor_inductance`, `motor_back_emf` on the hub;
+defaults are the 23HS22-2804S), the present speed and the measured 12 V.
+PWM runs at ~1.5 kHz, the PCA9685's limit. At 1/8 the I²C bus caps speed
+near 97 full steps/s.
 
 ### `cover` platform
 

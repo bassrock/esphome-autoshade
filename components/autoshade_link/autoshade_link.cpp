@@ -120,6 +120,31 @@ void AutoShadeLink::flush_display_() {
   }
 }
 
+void AutoShadeLink::set_drive(uint8_t div, bool pwm) {
+  if (!(div == 1 || div == 2 || div == 4 || div == 8))
+    div = 2;
+  if (div > 2)
+    pwm = true;  // microsteps need PWM
+  this->drive_div_ = div;
+  this->drive_pwm_ = pwm;
+  this->drive_set_ = true;
+  this->drive_dirty_ = true;
+}
+
+void AutoShadeLink::set_drive_current(float amps) {
+  this->drive_ma_ = (uint16_t) (amps * 1000.0f);
+  this->drive_dirty_ = true;
+}
+
+void AutoShadeLink::send_drive_() {
+  char out[64];
+  snprintf(out, sizeof(out), "D %u %u %u %u %u %u", this->drive_div_, this->drive_pwm_ ? 1 : 0,
+           this->drive_ma_, this->motor_mohm_, this->motor_mvs_, this->motor_uh_);
+  ESP_LOGI(TAG, "-> %s", out);
+  this->drive_dirty_ = false;
+  this->send_line_(out);
+}
+
 void AutoShadeLink::set_all_speed(uint16_t sps) {
   for (auto *c : this->covers_)
     c->set_max_speed(sps);
@@ -310,6 +335,8 @@ void AutoShadeLink::handle_line_(char *line) {
       break;
     case 'E':  // ERR ...
       ESP_LOGW(TAG, "board: %s", line);
+      if (strstr(line, "busy") != nullptr)
+        this->drive_dirty_ = true;  // D arrived mid-move; resend at rest
       break;
     case 'R':  // raw EEPROM bytes
       ESP_LOGI(TAG, "board EEPROM: %s", line + 1);
@@ -327,6 +354,7 @@ void AutoShadeLink::handle_status_(char *line) {
   uint32_t moving = 0, keys = 0, uptime = 0;
   int32_t adc0 = -1, adc1 = -1;
   int32_t eeprom = -1, fault = 0;  // -1: firmware older than 3.2
+  int32_t drive_div = -1;  // -1: firmware older than 3.4
   bool have_pos = false;
 
   char *save = nullptr;
@@ -354,6 +382,9 @@ void AutoShadeLink::handle_status_(char *line) {
       eeprom = (int32_t) strtol(tok + 2, nullptr, 10);
     } else if (strncmp(tok, "F=", 2) == 0) {
       fault = (int32_t) strtol(tok + 2, nullptr, 10);
+    } else if (strncmp(tok, "D=", 2) == 0) {
+      drive_div = (int32_t) strtol(tok + 2, nullptr, 10);
+
     }
   }
 
@@ -371,6 +402,7 @@ void AutoShadeLink::handle_status_(char *line) {
     this->seen_status_ = true;
     this->esp_synced_ = true;
     this->lcd_redraw_ = true;  // a reset board shows its boot banner, not our text
+    this->drive_dirty_ = true;
 
     // The board saves to EEPROM every time a motor comes to rest, so its copy
     // is exact — unless it reset part-way through a move, in which case its
@@ -406,6 +438,16 @@ void AutoShadeLink::handle_status_(char *line) {
     const uint8_t m = c->get_motor();
     if (m >= 1 && m <= 6)
       c->update_from_link(pos[m - 1], (moving >> (m - 1)) & 0x01);
+  }
+
+  // Drive changes need every motor at rest (the board rescales its counters).
+  // Only boards that report D= (3.4+) understand the command.
+  if (this->drive_dirty_ && this->drive_set_ && drive_div >= 0 && moving == 0) {
+    bool any_cmd = false;
+    for (auto *c : this->covers_)
+      any_cmd |= c->is_moving();  // a move sent but not yet showing as M=
+    if (!any_cmd)
+      this->send_drive_();
   }
 
   for (uint8_t b = 0; b < 5; b++) {

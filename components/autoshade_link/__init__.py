@@ -31,6 +31,12 @@ CONF_USB_CHANNEL = "usb_channel"
 # one built by avr/build.sh and shipped with this component.
 CONF_AVR_FIRMWARE = "avr_firmware"
 BUNDLED_AVR_FIRMWARE = Path(__file__).parent / "firmware" / "autoshade_dumb.hex"
+# Winding model for the board's PWM drive modes (firmware 3.4+). Defaults are
+# the StepperOnline 23HS22-2804S: 0.92 ohm, 2.68 mH, and a back-EMF constant
+# of ~0.32 V per rad/s (1.26 N.m holding at 2.8 A, both phases).
+CONF_MOTOR_RESISTANCE = "motor_resistance"
+CONF_MOTOR_INDUCTANCE = "motor_inductance"
+CONF_MOTOR_BACK_EMF = "motor_back_emf"
 # ATmega328P flash below Optiboot's 512 bytes.
 AVR_APP_MAX = 32256
 
@@ -56,6 +62,9 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_BATTERY_VOLTAGE): _voltage_schema(DEFAULT_BATTERY_SCALE),
             cv.Optional(CONF_USB_CHANNEL): cv.use_id(usb_uart.USBUartChannel),
             cv.Optional(CONF_AVR_FIRMWARE): cv.file_,
+            cv.Optional(CONF_MOTOR_RESISTANCE, default=0.92): cv.float_range(min=0.1, max=60),  # ohm
+            cv.Optional(CONF_MOTOR_INDUCTANCE, default=2.68): cv.float_range(min=0, max=60),  # mH
+            cv.Optional(CONF_MOTOR_BACK_EMF, default=0.318): cv.float_range(min=0, max=60),  # V/(rad/s)
         }
     )
     .extend(cv.polling_component_schema("500ms"))
@@ -99,6 +108,14 @@ async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
     await uart.register_uart_device(var, config)
+
+    cg.add(
+        var.set_motor_model(
+            config[CONF_MOTOR_RESISTANCE],
+            config[CONF_MOTOR_INDUCTANCE],
+            config[CONF_MOTOR_BACK_EMF],
+        )
+    )
 
     if CONF_USB_CHANNEL in config:
         channel = await cg.get_variable(config[CONF_USB_CHANNEL])

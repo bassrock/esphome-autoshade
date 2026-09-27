@@ -57,6 +57,19 @@ class AutoShadeLink : public PollingComponent, public uart::UARTDevice {
 
   bool is_linked() const { return this->linked_; }
 
+  /// Board drive mode (firmware 3.4+): microsteps per full step (1, 2, 4, 8),
+  /// on/off coils or sine PWM, and the PWM peak current in amps. Sent to the
+  /// board as soon as every motor is at rest, and again after it resets.
+  void set_drive(uint8_t div, bool pwm);
+  void set_drive_current(float amps);
+  /// Winding model for the PWM duty: ohms, millihenries, volts per rad/s.
+  void set_motor_model(float ohms, float mh, float v_per_rad_s) {
+    this->motor_mohm_ = (uint16_t) (ohms * 1000.0f);
+    this->motor_uh_ = (uint16_t) (mh * 1000.0f);
+    this->motor_mvs_ = (uint16_t) (v_per_rad_s * 1000.0f);
+    this->drive_dirty_ = true;
+  }
+
   /// Speed / acceleration for every cover, from the next move on. Full steps.
   void set_all_speed(uint16_t sps);
   void set_all_accel(uint16_t acc);
@@ -101,6 +114,15 @@ class AutoShadeLink : public PollingComponent, public uart::UARTDevice {
   void handle_status_(char *line);
   void resync_positions_();
   void finish_avr_update_();
+  void send_drive_();
+  uint8_t drive_div_{2};
+  bool drive_pwm_{false};
+  uint16_t drive_ma_{1200};
+  uint16_t motor_mohm_{920};  // 23HS22-2804S
+  uint16_t motor_uh_{2680};
+  uint16_t motor_mvs_{318};
+  bool drive_dirty_{false};   // board may not have our drive settings yet
+  bool drive_set_{false};     // set_drive() called at least once
 #ifdef AUTOSHADE_LINK_USB
   void set_dtr_(bool on);
   usb_uart::USBUartChannel *usb_channel_{nullptr};

@@ -302,7 +302,55 @@ number:
     on_value:
       - lambda: 'id(avr)->set_all_accel((uint16_t) x);'
 
+  # Peak winding current for the PWM drive modes. The DRV8871s cap it near
+  # 1.6 A no matter what; less is quieter and cooler, with less torque.
+  # On/off modes always run at that ~1.6 A.
+  - platform: template
+    id: motor_current
+    name: Motor Current
+    entity_category: config
+    icon: mdi:current-dc
+    unit_of_measurement: A
+    mode: slider
+    min_value: 0.4
+    max_value: 1.6
+    step: 0.1
+    initial_value: 1.2
+    optimistic: true
+    restore_value: true
+    on_value:
+      - lambda: 'id(avr)->set_drive_current(x);'
+
 select:
+  # How the board drives the windings (board firmware 3.4+). Applied as soon
+  # as every shade is at rest. Compare by ear:
+  #   Half step            on/off coils; v3.3's drive
+  #   Half step, even      sine PWM at 1/2: every half step the same torque
+  #   1/4 microstep        sine PWM
+  #   1/8 microstep        sine PWM, smoothest; speed capped near 97 steps/s
+  #   Full step            on/off, both coils always on; for comparison
+  # PWM modes run at ~1.5 kHz (the PCA9685's limit), so expect a faint whine.
+  - platform: template
+    id: drive_mode
+    name: Drive Mode
+    entity_category: config
+    icon: mdi:sine-wave
+    options:
+      - Half step
+      - Half step, even
+      - 1/4 microstep
+      - 1/8 microstep
+      - Full step
+    initial_option: Half step
+    optimistic: true
+    restore_value: true
+    on_value:
+      - lambda: |-
+          static const uint8_t divs[] = {2, 2, 4, 8, 1};
+          static const bool pwms[] = {false, true, true, true, false};
+          const size_t k = i < 5 ? i : 0;
+          id(avr)->set_drive(divs[k], pwms[k]);
+
   - platform: template
     id: setup_shade
     name: Setup Shade

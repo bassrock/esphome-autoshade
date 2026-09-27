@@ -1,5 +1,5 @@
 /*
- * AUTOSHADE dumb-board firmware  v3.3
+ * AUTOSHADE dumb-board firmware  v3.4
  * Board 100108 Rev C  (ATmega328P)
  *
  * This firmware contains NO POLICY. It knows nothing about shades, feet,
@@ -13,6 +13,21 @@
  *   owns here          : step timing, step counters, coil phase, raw I2C
  *   owns on the ESP    : positions, travel, speed, hold policy, buttons,
  *                        screen contents, schedule, homing, persistence
+ *
+ * v3.4: SELECTABLE DRIVE, INCLUDING PWM MICROSTEPPING. The PCA9685s are PWM
+ * chips, so a DRV8871 input can be pulsed rather than only switched. With one
+ * input held high and the other pulsed, the bridge alternates drive and brake
+ * (slow decay), and the winding current follows the duty cycle. That gives:
+ *   - sine microstepping at 1/2 (equal torque on every half step), 1/4, 1/8
+ *   - a settable peak current below the DRV8871's fixed ~1.6 A limit
+ * The duty needed for a current depends on the winding resistance and
+ * inductance, the back-EMF at the present speed, and the supply voltage (read
+ * from A0), so it is recomputed every 10 ms while a motor runs. Asking for too
+ * much is harmless: the DRV8871 still chops at its own limit.
+ * The PCA9685s run at their fastest PWM, ~1.5 kHz; that is audible, which is
+ * the trade against the step buzz. The plain on/off half and full step modes
+ * are still there. D selects the mode (only with every motor at rest) and it
+ * is saved with the positions. The wire protocol stays in full steps.
  *
  * v3.3: HALF-STEP DRIVE. Full steps at 250+ steps/s stall these motors and
  * grind; half steps at ~90 full steps/s run cleanly and quietly. The wire
@@ -65,12 +80,12 @@
  * ---------------------------------------------------------------------------
  * Protocol: 115200 8N1, one command per line, '\n' terminated. n = motor 1..6.
  * All positions, speeds and accelerations on the wire are FULL steps (200/rev);
- * the board half-steps internally (see HALF below).
+ * the board runs in 1, 2, 4 or 8 microsteps per full step internally (see D).
  *
- *   V                          -> V AUTOSHADE-DUMB 3.3 N=6
+ *   V                          -> V AUTOSHADE-DUMB 3.4 N=6
  *   Q                          -> Q P=p1,..,p6 M=<moving> K=<buttons>
  *                                   U=<uptime_s> A=<adc0> B=<adc1>
- *                                   E=<0|1> F=<0|1>
+ *                                   E=<0|1> F=<0|1> D=<div> W=<0|1>
  *        E=1: P= is real — restored from EEPROM at boot, or set by X since.
  *        E=0: blank EEPROM, counters are just zeros. Push positions with X.
  *        F=1: the last move was cancelled because 12 V dropped out.
@@ -82,6 +97,12 @@
  *   L row text                 -> OK   literal text to LCD row 0 or 1
  *   G v                        -> OK   backlight bits 0..7
  *   R addr len                 -> R addr hh hh ..  raw EEPROM bytes (len<=16)
+ *   D div pwm mA mohm mvs uh   -> OK | ERR busy   drive mode, at rest only:
+ *        div  microsteps per full step: 1, 2, 4 or 8
+ *        pwm  0 = on/off coils (div 1 or 2 only), 1 = sine PWM
+ *        mA   peak winding current for pwm (the DRV8871 caps it near 1600)
+ *        mohm winding resistance, mvs back-EMF (mV per rad/s),
+ *        uh   winding inductance: the motor model used to pick the duty
  *
  * K= is a sticky button mask, cleared on every Q, so a short press between
  * polls is never lost. Bits follow the Adafruit RGB LCD shield:
@@ -108,6 +129,9 @@ struct Saved {
   int32_t pos[N_MOTORS];
   uint8_t phase[N_MOTORS];
   uint8_t endMask[N_MOTORS];
+  uint8_t div;  // positions and phases are in 1/div full steps
+  uint8_t pwm;
+  uint16_t mA, mohm, mvs, uh;
   uint8_t crc;
 };
 
@@ -180,7 +204,7 @@ Print &out = Serial;
 #endif
 
 #define FW_NAME "AUTOSHADE-DUMB"
-#define FW_VER "3.3"
+#define FW_VER "3.4"
 
 /* ---------------- PCA9685, driven directly ----------------
  *
@@ -202,7 +226,10 @@ const uint8_t PORT_BASE[2] = {9, 3};             // first channel of each port
 #define PCA_MODE1 0x00
 #define PCA_MODE2 0x01
 #define PCA_LED0_ON_L 0x06
+#define PCA_PRESCALE 0xFE
 #define MODE1_AI 0x20      // auto-increment
+#define MODE1_SLEEP 0x10
+#define PRESCALE_MAX_HZ 3  // 25 MHz / (4096 * (3 + 1)) = 1526 Hz, the fastest
 #define MODE2_OUTDRV 0x04  // totem-pole outputs
 
 /* Half-step drive: two-phase-on full steps {0x06, 0x05, 0x09, 0x0A} with a
@@ -211,12 +238,42 @@ const uint8_t PORT_BASE[2] = {9, 3};             // first channel of each port
    v3.2 direction; if a shade jogs the wrong way, reverse it
    ({0x05, 0x04, 0x06, 0x02, 0x0A, 0x08, 0x09, 0x01} is the other way). */
 const uint8_t HALF_TABLE[8] = {0x06, 0x04, 0x05, 0x01, 0x09, 0x08, 0x0A, 0x02};
-#define HALF 2  // AccelStepper runs in half steps; the protocol stays in full steps
+/* The same full steps without the single-coil states. */
+const uint8_t FULL_TABLE[4] = {0x06, 0x05, 0x09, 0x0A};
+
+/* Sine drive. Phase k at div 8 is the electrical angle 45 + 11.25*k degrees;
+   winding A carries cos, winding B sin. At div 2 that lands exactly on
+   HALF_TABLE's states, so every mode agrees on where the full steps are and
+   a change of mode never moves the rotor. x1000. */
+const int16_t COS32[32] = {707,  556,  383,  195,  0,    -195, -383, -556, -707, -831, -924,
+                           -981, -1000, -981, -924, -831, -707, -556, -383, -195, 0,    195,
+                           383,  556,  707,  831,  924,  981,  1000, 981,  924,  831};
+
+/* Drive settings (D). Defaults are v3.3's on/off half step, and a
+   23HS22-2804S: 0.92 ohm, 2.68 mH, ~0.32 V per rad/s. */
+uint8_t div_ = 2;
+bool pwm = false;
+uint16_t driveMa = 1200, driveMohm = 920, driveMvs = 318, driveUh = 2680;
+float vmVolts = 12.0f;
+uint16_t peakCounts = 0;  // PWM duty (of 4096) for the peak of the sine, active motor
+
+/* Steps per second the I2C bus can carry: one 17-byte coil write each. */
+#define MAX_STEP_RATE 780
 
 uint8_t phase[N_MOTORS];
 uint8_t endMask[N_MOTORS];
 
 void pcaInit(uint8_t addr) {
+  /* The prescaler can only be written while asleep. Power-on default is
+     200 Hz, which would sing in the windings; run as fast as it goes. */
+  Wire.beginTransmission(addr);
+  Wire.write(PCA_MODE1);
+  Wire.write(MODE1_AI | MODE1_SLEEP);
+  Wire.endTransmission();
+  Wire.beginTransmission(addr);
+  Wire.write(PCA_PRESCALE);
+  Wire.write(PRESCALE_MAX_HZ);
+  Wire.endTransmission();
   Wire.beginTransmission(addr);
   Wire.write(PCA_MODE1);
   Wire.write(MODE1_AI);  // clear SLEEP, enable auto-increment
@@ -243,12 +300,67 @@ void writeCoils(uint8_t m, uint8_t mask) {
   Wire.endTransmission();
 }
 
+extern AccelStepper stp[N_MOTORS];
+
+/* One PCA9685 channel: high for `high` counts of 4096 (0 = off, 4096 = on). */
+void pwmChannel(uint16_t high) {
+  if (high >= 4096) {
+    Wire.write((uint8_t)0x00); Wire.write((uint8_t)0x10);  // full on
+    Wire.write((uint8_t)0x00); Wire.write((uint8_t)0x00);
+  } else if (high == 0) {
+    Wire.write((uint8_t)0x00); Wire.write((uint8_t)0x00);
+    Wire.write((uint8_t)0x00); Wire.write((uint8_t)0x10);  // full off
+  } else {
+    Wire.write((uint8_t)0x00); Wire.write((uint8_t)0x00);
+    Wire.write((uint8_t)(high & 0xFF)); Wire.write((uint8_t)(high >> 8));
+  }
+}
+
+/* Signed duty per winding, -4096..4096. Positive = IN1 high (the direction
+   HALF_TABLE calls +). The input on the driven side stays high and the other
+   one is high for the rest of the period, so the off-time is brake (slow
+   decay): the current ripples a little instead of collapsing each cycle. */
+void writeDuty(uint8_t m, int16_t a, int16_t b) {
+  Wire.beginTransmission(PCA_ADDR[m / 2]);
+  Wire.write(PCA_LED0_ON_L + 4 * PORT_BASE[m % 2]);
+  // channel order: A_IN2, A_IN1, B_IN1, B_IN2
+  pwmChannel(a >= 0 ? 4096 - a : 4096);
+  pwmChannel(a >= 0 ? 4096 : 4096 + a);
+  pwmChannel(b >= 0 ? 4096 : 4096 + b);
+  pwmChannel(b >= 0 ? 4096 - b : 4096);
+  Wire.endTransmission();
+}
+
+void driveCoils(uint8_t m) {
+  if (!pwm) {
+    writeCoils(m, div_ == 1 ? FULL_TABLE[phase[m] & 0x03] : HALF_TABLE[phase[m] & 0x07]);
+    return;
+  }
+  const uint8_t k = (uint8_t)(phase[m] * (8 / div_));
+  const int32_t pk = peakCounts;
+  writeDuty(m, (int16_t)(COS32[k & 31] * pk / 1000), (int16_t)(COS32[(k - 8) & 31] * pk / 1000));
+}
+
+/* Duty for the peak current at the motor's present speed: the winding needs
+   I * |R + j w L| plus the back-EMF, out of the supply we actually have. An
+   overestimate only clips at the DRV8871's limit. */
+void updatePeak(uint8_t m) {
+  const float wMech = fabs(stp[m].speed()) / div_ * (6.2831853f / 200.0f);  // rad/s
+  const float wElec = wMech * 50.0f;  // 50 pole pairs
+  const float r = driveMohm / 1000.0f, xl = wElec * driveUh / 1e6f;
+  const float volts = driveMa / 1000.0f * sqrt(r * r + xl * xl) + driveMvs / 1000.0f * wMech;
+  const float vm = vmVolts > 5.0f ? vmVolts : 12.0f;
+  float d = volts / vm;
+  if (d > 1.0f) d = 1.0f;
+  peakCounts = (uint16_t)(d * 4096.0f);
+}
+
 /* Phase is tracked separately from the step counter on purpose: X can move the
    counter without moving the rotor, and deriving phase from position would
    make the next step jump. */
 void advance(uint8_t m, int8_t dir) {
-  phase[m] = (uint8_t)((phase[m] + dir) & 0x07);
-  writeCoils(m, HALF_TABLE[phase[m]]);
+  phase[m] = (uint8_t)((phase[m] + dir) & (4 * div_ - 1));
+  driveCoils(m);
 }
 
 void f0() { advance(0, 1); }
@@ -300,7 +412,7 @@ int adc0 = 0, adc1 = 0;
 
 #define EE_BASE 0x200
 #define EE_SLOT 0x40
-#define EE_MAGIC 0x5A54  // v3.3: half steps. v3.2's 0x5A53 reads as blank
+#define EE_MAGIC 0x5A55  // v3.4: record carries its drive mode. Older ones read as blank
 
 uint16_t eeSeq = 0;
 bool posValid = false;  // E= in the status line
@@ -330,6 +442,12 @@ void saveState() {
     s.phase[m] = phase[m];
     s.endMask[m] = endMask[m];
   }
+  s.div = div_;
+  s.pwm = pwm;
+  s.mA = driveMa;
+  s.mohm = driveMohm;
+  s.mvs = driveMvs;
+  s.uh = driveUh;
   s.crc = crc8((const uint8_t *)&s, sizeof(Saved) - 1);
   EEPROM.put(EE_BASE + (s.seq & 1) * EE_SLOT, s);
 }
@@ -340,9 +458,15 @@ bool loadState() {
   if (!va && !vb) return false;
   Saved &s = (va && vb) ? (((int16_t)(a.seq - b.seq) > 0) ? a : b) : (va ? a : b);
   eeSeq = s.seq;
+  div_ = (s.div == 1 || s.div == 2 || s.div == 4 || s.div == 8) ? s.div : 2;
+  pwm = s.pwm || div_ > 2;
+  driveMa = s.mA;
+  driveMohm = s.mohm;
+  driveMvs = s.mvs;
+  driveUh = s.uh;
   for (uint8_t m = 0; m < N_MOTORS; m++) {
     stp[m].setCurrentPosition(s.pos[m]);
-    phase[m] = s.phase[m] & 0x07;
+    phase[m] = s.phase[m] & (4 * div_ - 1);
     endMask[m] = s.endMask[m] & 0x0F;
   }
   return true;
@@ -355,9 +479,11 @@ bool loadState() {
 #define VM_MIN_COUNTS 650
 bool vmFault = false;
 unsigned long lastVm = 0;
+unsigned long lastPeak = 0;
 
 bool vmOk() {
   adc0 = analogRead(A0);
+  vmVolts = adc0 * 0.01238f;
   return adc0 >= VM_MIN_COUNTS;
 }
 
@@ -386,7 +512,7 @@ void sendVersion() {
 void sendStatus() {
   out.print(F("Q P="));
   for (uint8_t m = 0; m < N_MOTORS; m++) {
-    out.print(stp[m].currentPosition() / HALF);
+    out.print(stp[m].currentPosition() / div_);
     if (m < N_MOTORS - 1) out.print(',');
   }
   out.print(F(" M="));
@@ -402,7 +528,11 @@ void sendStatus() {
   out.print(F(" E="));
   out.print(posValid ? 1 : 0);
   out.print(F(" F="));
-  out.println(vmFault ? 1 : 0);
+  out.print(vmFault ? 1 : 0);
+  out.print(F(" D="));
+  out.print(div_);
+  out.print(F(" W="));
+  out.println(pwm ? 1 : 0);
   btnSticky = 0;  // sticky mask is consumed by the read
 }
 
@@ -449,8 +579,8 @@ void handleLine(char *s) {
     return;
   }
 
-  char *a[5];
-  uint8_t n = split(rest, a, 5);
+  char *a[6];
+  uint8_t n = split(rest, a, 6);
 
   switch (cmd) {
     case 'V':
@@ -469,11 +599,12 @@ void handleLine(char *s) {
       long acc = atol(a[3]);
       if (sps < 1) sps = 1;
       if (acc < 1) acc = 1;
-      stp[m].setMaxSpeed((float)sps * HALF);
-      stp[m].setAcceleration((float)acc * HALF);
+      if (sps * div_ > MAX_STEP_RATE) sps = MAX_STEP_RATE / div_;  // the bus can't go faster
+      stp[m].setMaxSpeed((float)sps * div_);
+      stp[m].setAcceleration((float)acc * div_);
       endMask[m] = (uint8_t)(atol(a[4]) & 0x0F);
       vmFault = false;
-      stp[m].moveTo(atol(a[1]) * HALF);
+      stp[m].moveTo(atol(a[1]) * div_);
       out.println(F("OK"));
       return;
     }
@@ -496,7 +627,7 @@ void handleLine(char *s) {
       int8_t m = parseMotor(a[0]);
       if (m < 0) { out.println(F("ERR motor")); return; }
       long p = atol(a[1]);
-      stp[m].setCurrentPosition(p * HALF);  // also zeroes speed
+      stp[m].setCurrentPosition(p * div_);  // also zeroes speed
       posValid = true;
       if (active < 0) saveState();  // mid-move, the save at rest covers it
       out.println(F("OK"));
@@ -515,6 +646,31 @@ void handleLine(char *s) {
     case 'G': {
       if (n < 1) { out.println(F("ERR args")); return; }
       lcd.setBacklight((uint8_t)(atol(a[0]) & 0x07));
+      out.println(F("OK"));
+      return;
+    }
+
+    case 'D': {  // D div pwm mA mohm mvs uh
+      if (n < 6) { out.println(F("ERR args")); return; }
+      long d = atol(a[0]);
+      bool w = atol(a[1]) != 0;
+      if (!(d == 1 || d == 2 || d == 4 || d == 8) || (!w && d > 2)) { out.println(F("ERR mode")); return; }
+      if (active >= 0 || movingMask() != 0) { out.println(F("ERR busy")); return; }
+      /* Rescale counters and phases. Full steps sit on the same electrical
+         angle in every mode, so a rotor at rest does not move. */
+      for (uint8_t m = 0; m < N_MOTORS; m++) {
+        long pos = stp[m].currentPosition();
+        long np = (pos * d + (pos >= 0 ? div_ / 2 : -(div_ / 2))) / div_;
+        stp[m].setCurrentPosition(np);
+        phase[m] = (uint8_t)(((phase[m] * d + div_ / 2) / div_) & (4 * d - 1));
+      }
+      div_ = (uint8_t)d;
+      pwm = w;
+      driveMa = (uint16_t)constrain(atol(a[2]), 0, 3000);
+      driveMohm = (uint16_t)constrain(atol(a[3]), 1, 60000);
+      driveMvs = (uint16_t)constrain(atol(a[4]), 0, 60000);
+      driveUh = (uint16_t)constrain(atol(a[5]), 0, 60000);
+      saveState();
       out.println(F("OK"));
       return;
     }
@@ -589,8 +745,8 @@ void setup() {
   for (uint8_t m = 0; m < N_MOTORS; m++) {
     phase[m] = 0;
     endMask[m] = 0x00;  // coast
-    stp[m].setMaxSpeed(90 * HALF);
-    stp[m].setAcceleration(100 * HALF);
+    stp[m].setMaxSpeed(90 * 2);
+    stp[m].setAcceleration(100 * 2);
   }
   posValid = loadState();  // positions, phase and hold mask from last time
   for (uint8_t m = 0; m < N_MOTORS; m++) writeCoils(m, endMask[m]);
@@ -629,6 +785,7 @@ void loop() {
     lastSec = now;
     uptime++;
     adc0 = analogRead(A0);
+    vmVolts = adc0 * 0.01238f;
     adc1 = analogRead(A1);
   }
 
@@ -650,6 +807,8 @@ void loop() {
         }
         active = (int8_t)m;
         lastVm = now;
+        lastPeak = now;
+        updatePeak(m);  // from standstill: just I * R
         break;
       }
     }
@@ -657,11 +816,17 @@ void loop() {
 
   if (active >= 0) {
     uint8_t m = (uint8_t)active;
-    /* 20 ms between checks: at 400 half steps/s at most 8 steps can be counted
+    /* 20 ms between checks: at 400 steps/s at most 8 steps can be counted
        after VM collapses. One analogRead is ~110 us. */
     if (now - lastVm >= 20) {
       lastVm = now;
       if (!vmOk()) cancelAll();
+    }
+    /* PWM duty follows speed (back-EMF, inductance). ~0.2 ms of float math,
+       so every 10 ms rather than every step. */
+    if (pwm && now - lastPeak >= 10) {
+      lastPeak = now;
+      updatePeak(m);
     }
     if (stp[m].distanceToGo() != 0) {
       stp[m].run();
