@@ -23,15 +23,19 @@ static const uint8_t STK_PROG_PAGE = 0x64;
 static const uint8_t STK_READ_PAGE = 0x74;
 
 static const uint32_t SYNC_WINDOW_MS = 2500;  // Optiboot listens ~1 s after reset
-static const uint32_t SYNC_RETRY_MS = 100;
+// Longer than a USB round trip, so a GET_SYNC is never resent while the reply
+// to the last one is still on its way (avrdude waits 500 ms).
+static const uint32_t SYNC_RETRY_MS = 300;
 static const uint32_t REPLY_TIMEOUT_MS = 500;
-static const uint32_t SETTLE_MS = 150;  // well inside Optiboot's ~1 s watchdog
+static const uint32_t SETTLE_MS = 100;  // well inside Optiboot's ~1 s watchdog
 
 void AvrFlasher::start(uart::UARTDevice *uart) {
   this->uart_ = uart;
   this->page_ = 0;
   this->started_ms_ = millis();
   this->waiting_ = false;
+  this->reply_len_ = 0;
+  this->trace_len_ = 0;
   this->state_ = STATE_SYNC;
   this->set_status_("syncing with bootloader");
 }
@@ -54,7 +58,8 @@ void AvrFlasher::loop() {
       this->fail_("bootloader did not answer (no Optiboot, or reset failed)");
       return;
     }
-    if (!this->waiting_ || now - this->sent_ms_ >= SYNC_RETRY_MS) {
+    // Not while half a reply is in: resending would throw its tail away.
+    if (!this->waiting_ || (this->reply_len_ == 0 && now - this->sent_ms_ >= SYNC_RETRY_MS)) {
       const uint8_t cmd[] = {STK_GET_SYNC, CRC_EOP};
       this->send_(cmd, sizeof(cmd), 2);
     }
@@ -63,8 +68,10 @@ void AvrFlasher::loop() {
 
   if (this->state_ == STATE_SETTLE) {
     if (now - this->sent_ms_ >= SETTLE_MS) {
-      this->state_ = STATE_PROGMODE;
-      const uint8_t cmd[] = {STK_ENTER_PROGMODE, CRC_EOP};
+      // One more GET_SYNC, now with nothing else in flight, checked strictly.
+      // A stray reply from a retry would fail here, not mid-programming.
+      this->state_ = STATE_CONFIRM;
+      const uint8_t cmd[] = {STK_GET_SYNC, CRC_EOP};
       this->send_(cmd, sizeof(cmd), 2);
     }
     return;
@@ -81,7 +88,11 @@ void AvrFlasher::loop() {
 }
 
 void AvrFlasher::feed(uint8_t c) {
-  if (!this->busy() || !this->waiting_)
+  if (!this->busy())
+    return;
+  if (this->trace_len_ < sizeof(this->trace_))
+    this->trace_[this->trace_len_++] = c;
+  if (!this->waiting_)
     return;
 
   if (this->state_ == STATE_SYNC) {
@@ -112,8 +123,13 @@ void AvrFlasher::feed(uint8_t c) {
 
   this->waiting_ = false;
   if (this->reply_[0] != STK_INSYNC || this->reply_[this->reply_want_ - 1] != STK_OK) {
-    char why[48];
-    snprintf(why, sizeof(why), "bad reply 0x%02X at page %u", this->reply_[0], (unsigned) this->page_);
+    char why[64];
+    if (this->reply_[0] == 'V')
+      snprintf(why, sizeof(why), "bootloader exited (sketch banner) at step %u page %u", this->state_,
+               (unsigned) this->page_);
+    else
+      snprintf(why, sizeof(why), "bad reply 0x%02X at step %u page %u", this->reply_[0], this->state_,
+               (unsigned) this->page_);
     this->fail_(why);
     return;
   }
@@ -137,6 +153,9 @@ void AvrFlasher::feed(uint8_t c) {
 // one after it.
 void AvrFlasher::next_() {
   switch (this->state_) {
+    case STATE_CONFIRM:
+      this->state_ = STATE_PROGMODE;
+      break;
     case STATE_PROGMODE:
       this->page_ = 0;
       this->state_ = STATE_WRITE_ADDR;
@@ -171,6 +190,12 @@ void AvrFlasher::next_() {
 
   const size_t base = this->page_ * PAGE;
   switch (this->state_) {
+    case STATE_PROGMODE: {
+      this->set_status_("entering programming mode");
+      const uint8_t cmd[] = {STK_ENTER_PROGMODE, CRC_EOP};
+      this->send_(cmd, sizeof(cmd), 2);
+      break;
+    }
     case STATE_WRITE_ADDR:
     case STATE_VERIFY_ADDR: {
       if (this->state_ == STATE_WRITE_ADDR)
@@ -214,6 +239,13 @@ void AvrFlasher::fail_(const char *why) {
   this->waiting_ = false;
   this->set_status_("failed: %s", why);
   ESP_LOGE(TAG, "%s", this->status_.c_str());
+  // What the board actually said since the reset, for diagnosis.
+  char hex[3 * sizeof(this->trace_) + 1];
+  size_t n = 0;
+  for (size_t i = 0; i < this->trace_len_; i++)
+    n += snprintf(hex + n, sizeof(hex) - n, "%02X ", this->trace_[i]);
+  hex[n] = '\0';
+  ESP_LOGE(TAG, "first %u bytes received: %s", (unsigned) this->trace_len_, hex);
 }
 
 void AvrFlasher::set_status_(const char *fmt, ...) {

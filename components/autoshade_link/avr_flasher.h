@@ -43,6 +43,7 @@ class AvrFlasher {
     STATE_IDLE,
     STATE_SYNC,
     STATE_SETTLE,
+    STATE_CONFIRM,
     STATE_PROGMODE,
     STATE_WRITE_ADDR,
     STATE_WRITE_PAGE,
@@ -73,6 +74,8 @@ class AvrFlasher {
   uint8_t reply_[PAGE + 2];
   size_t reply_len_{0};
   size_t reply_want_{0};
+  uint8_t trace_[48];
+  size_t trace_len_{0};
   std::string status_{"idle"};
 };
 

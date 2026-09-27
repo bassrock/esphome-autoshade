@@ -160,13 +160,22 @@ bool AutoShadeLink::start_avr_update() {
   this->tx_queue_.clear();
   this->awaiting_reply_ = false;
   this->updating_ = true;
-  this->update_step_ = 0;
-  this->update_ms_ = millis();
-  this->set_dtr_(false);
+  this->update_attempt_ = 0;
+  this->begin_update_attempt_();
   return true;
 #else
   ESP_LOGW(TAG, "board firmware update needs usb_channel: set on autoshade_link");
   return false;
+#endif
+}
+
+void AutoShadeLink::begin_update_attempt_() {
+#ifdef AUTOSHADE_LINK_USB
+  this->update_attempt_++;
+  ESP_LOGI(TAG, "board update attempt %u: resetting into the bootloader", this->update_attempt_);
+  this->update_step_ = 0;
+  this->update_ms_ = millis();
+  this->set_dtr_(false);
 #endif
 }
 
@@ -175,12 +184,18 @@ bool AutoShadeLink::start_avr_update() {
 // capacitor, so asserting DTR after a moment deasserted is one reset pulse.
 void AutoShadeLink::set_dtr_(bool on) {
   static const uint8_t CDC_SET_CONTROL_LINE_STATE = 0x22;
-  this->usb_channel_->get_parent()->control_transfer(
+  this->dtr_done_ = false;
+  const bool queued = this->usb_channel_->get_parent()->control_transfer(
       usb_host::USB_TYPE_CLASS | usb_host::USB_RECIP_INTERFACE, CDC_SET_CONTROL_LINE_STATE, on ? 0x0003 : 0x0000,
-      0, [on](const usb_host::TransferStatus &status) {
+      0, [this, on](const usb_host::TransferStatus &status) {
         if (!status.success)
           ESP_LOGW(TAG, "DTR %s failed: %X", on ? "on" : "off", status.error_code);
+        this->dtr_done_ = true;
       });
+  if (!queued) {
+    ESP_LOGW(TAG, "DTR %s could not be queued", on ? "on" : "off");
+    this->dtr_done_ = true;
+  }
 }
 #endif
 
@@ -206,22 +221,36 @@ void AutoShadeLink::loop() {
       if (!this->read_byte(&c))
         break;
       if (this->update_step_ == 2)
-        this->flasher_.feed(c);  // anything before that is the old sketch talking
+        this->flasher_.feed(c);  // anything before that is the old sketch; drained
     }
 #ifdef AUTOSHADE_LINK_USB
-    if (this->update_step_ == 0 && now - this->update_ms_ >= 100) {
+    // avrdude's timing: DTR off 250 ms, DTR on (the reset edge), 50 ms, then
+    // talk. Each wait counts from when the control transfer actually
+    // completed, not from when it was queued (1 s cap if it never reports).
+    const bool dtr_settled = this->dtr_done_ || now - this->update_ms_ >= 1000;
+    if (this->update_step_ == 0 && dtr_settled && now - this->update_ms_ >= 250) {
       this->set_dtr_(true);
       this->update_step_ = 1;
       this->update_ms_ = now;
-    } else if (this->update_step_ == 1 && now - this->update_ms_ >= 20) {
+    } else if (this->update_step_ == 1 && dtr_settled) {
+      this->update_step_ = 3;  // reset edge sent: 50 ms for Optiboot to start
+      this->update_ms_ = now;
+    } else if (this->update_step_ == 3 && now - this->update_ms_ >= 50) {
       this->update_step_ = 2;
       this->flasher_.start(this);
     }
 #endif
     if (this->update_step_ == 2) {
       this->flasher_.loop();
-      if (this->flasher_.done())
-        this->finish_avr_update_();
+      if (this->flasher_.done()) {
+        if (!this->flasher_.succeeded() && this->update_attempt_ < 3) {
+          ESP_LOGW(TAG, "board update attempt %u failed (%s); retrying", this->update_attempt_,
+                   this->flasher_.status().c_str());
+          this->begin_update_attempt_();
+        } else {
+          this->finish_avr_update_();
+        }
+      }
     }
     return;
   }

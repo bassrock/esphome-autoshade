@@ -121,7 +121,10 @@ class AutoShadeLink : public PollingComponent, public uart::UARTDevice {
 
   AvrFlasher flasher_;
   bool updating_{false};
-  uint8_t update_step_{0};  // 0 DTR off sent, 1 DTR on sent, 2 flashing
+  void begin_update_attempt_();
+  uint8_t update_step_{0};  // 0 DTR off sent, 1 DTR on sent, 3 waiting for Optiboot, 2 flashing
+  uint8_t update_attempt_{0};
+  bool dtr_done_{false};    // the last DTR control transfer has completed
   uint32_t update_ms_{0};
   std::string board_version_;
   std::string bundled_version_;
