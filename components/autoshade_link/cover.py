@@ -30,9 +30,10 @@ CONFIG_SCHEMA = (
             cv.Required(CONF_MOTOR): cv.int_range(min=1, max=6),
             # Full drop in steps. 2124 steps per foot, so 7 ft = 14868.
             cv.Required(CONF_TRAVEL_STEPS): cv.int_range(min=100, max=200000),
-            # The board's I2C bus tops out near 797 steps/s across all motors.
-            cv.Optional(CONF_MAX_SPEED, default=400): cv.int_range(min=20, max=1500),
-            cv.Optional(CONF_ACCELERATION, default=400): cv.int_range(min=20, max=4000),
+            # Full steps/s; the board half-steps internally. These motors stall
+            # and grind above ~150 (250+ in full step); 90 / 100 runs quietly.
+            cv.Optional(CONF_MAX_SPEED, default=90): cv.int_range(min=20, max=400),
+            cv.Optional(CONF_ACCELERATION, default=100): cv.int_range(min=20, max=4000),
             # brake shorts the windings at rest: no current, resists back-drive.
             cv.Optional(CONF_HOLD, default="brake"): cv.enum(HOLD_MODES, lower=True),
             # Steps driven past zero into the top hard stop when homing.

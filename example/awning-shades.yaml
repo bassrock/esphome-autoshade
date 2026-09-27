@@ -1,57 +1,26 @@
 # =============================================================================
-# AUTOSHADE — ESP32-S3 (Hosyond N16R8 DevKitC clone) as USB host
+# awning-shades — the live config for the AUTOSHADE board (ESP32-S3 USB host).
+# Paste into the HA ESPHome Builder; keep your own secrets.
 #
-#   ESP32-S3  --USB host, CDC-ACM 115200-->  ATmega16U2  --UART-->  ATmega328P
+# Everything below `esphome:` follows example/autoshade.yaml, plus:
+#   * Mark Selected Down / Up: tell the ESP where a shade physically is,
+#     without moving it.
+#   * Motor Speed / Acceleration sliders (full steps; the board half-steps).
+#   * Update Board Firmware: reflashes the board's ATmega328P over USB with
+#     the autoshade_dumb.hex bundled in this component. No laptop needed.
 #
-# The shade board runs avr/autoshade_dumb.ino, which holds NO policy: it runs
-# step trains, counts steps, reports raw button bits and raw ADC counts, and
-# writes literal text to the LCD. Everything that decides anything — travel,
-# speed, what a button does, what the screen says, the schedule, homing,
-# position across reboots — is in this file.
-#
-# THIS FILE REPLACES the earlier autoshade.yaml (ESP32-S3-USB-OTG kit) and
-# autoshade-s3-devkit.yaml. Delete those; keep only this one.
-#
-# -----------------------------------------------------------------------------
-# WIRING — one cable, nothing else.
-#
-#   ESP32-S3 native USB-C port  ==USB-C to USB-B cable==>  shade board USB-B
-#
-# The S3's USB-OTG is hardwired to GPIO19 (D-) and GPIO20 (D+), and those run
-# to the native USB-C port. Your cable carries them straight to the '16U2.
-#
-# THE TWO USB-C PORTS ARE NOT INTERCHANGEABLE:
-#   * the one marked COM / UART goes through a USB-serial chip — use it for
-#     flashing, for logs, and to power the ESP. A 5 V charger lives here.
-#   * the one marked USB is the native port — this is where your cable goes.
-#     Nothing else is ever plugged in here.
-#
-# -----------------------------------------------------------------------------
-# THE ONE THING TO WATCH: VBUS
-#
-# In host mode the ESP is supposed to supply 5 V out of its USB port. A DevKitC
-# clone will not — its VBUS pin is wired to RECEIVE power, not send it. Whether
-# that matters depends on whether the shade board's '16U2 will enumerate
-# without seeing 5 V from the host. It has its own power from the 12 V supply
-# at J5, so it may be perfectly happy. This is untested.
-#
-# HOW TO TELL: the "Controller Link" sensor below, and the ESPHome log. If the
-# log shows the USB host stack starting but never enumerating a device, VBUS is
-# the reason — not the cable, not this config.
-#
-# IF IT TURNS OUT YOU NEED VBUS: the fix is to stop using the USB-C port and
-# feed the four USB signals in by hand instead — a USB Type-A female
-# screw-terminal breakout wired D- to GPIO19, D+ to GPIO20, VBUS to the 5V pin,
-# GND to GND, then a plain USB A-to-B cable to the shade board. No config
-# change is needed for that; D+/D- are the same two pins either way.
-#
-# Travel scaling, unchanged from the original firmware: 2124 steps per foot.
-#     travel_steps = drop_in_feet * 2124
+# Steps per inch: the old "2124 steps/ft" (177/in) is ~1.35x too high for
+# these shades; measured values are 126-139. Measure yours (jog 10 in, tape
+# it) and set steps_per_inch.
 # =============================================================================
 
+substitutions:
+  steps_per_inch: "130"
+  steps_per_foot: "1560"   # steps_per_inch * 12
+
 esphome:
-  name: autoshade
-  friendly_name: Patio Shades
+  name: awning-shades
+  friendly_name: awning-shades
 
 esp32:
   # `variant` is preferred over `board` in current ESPHome. N16R8 = 16 MB
@@ -66,7 +35,7 @@ external_components:
   # Pulled straight from GitHub - nothing to copy into /config/esphome.
   # refresh: 0s re-fetches on every build, which is what you want while the
   # component is still changing. Drop it (default 1day) once it is stable.
-  - source: github://YOUR-USERNAME/esphome-autoshade@main
+  - source: github://bassrock/esphome-autoshade@main
     components: [autoshade_link]
     refresh: 0s
 
@@ -135,6 +104,7 @@ usb_uart:
 autoshade_link:
   id: avr
   uart_id: avr_uart
+  usb_channel: avr_uart     # lets the ESP reset the board to update its firmware
   update_interval: 500ms
   supply_voltage:
     name: Shade Controller 12V
@@ -151,9 +121,7 @@ cover:
     id: shade_1
     name: Shade 1
     motor: 1
-    travel_steps: 14868     # 7.0 ft default; set the real length from HA
-    max_speed: 400
-    acceleration: 400
+    travel_steps: 9360      # 6 ft at 130 steps/in; Set Top/Bottom Here replaces it
     hold: brake
     home_overrun: 150
 
@@ -161,7 +129,7 @@ cover:
     id: shade_2
     name: Shade 2
     motor: 2
-    travel_steps: 14868
+    travel_steps: 9360
     hold: brake
     home_overrun: 150
 
@@ -169,7 +137,7 @@ cover:
     id: shade_3
     name: Shade 3
     motor: 3
-    travel_steps: 14868
+    travel_steps: 9360
     hold: brake
     home_overrun: 150
 
@@ -177,7 +145,7 @@ cover:
     id: shade_4
     name: Shade 4
     motor: 4
-    travel_steps: 14868
+    travel_steps: 9360
     hold: brake
     home_overrun: 150
 
@@ -185,7 +153,7 @@ cover:
     id: shade_5
     name: Shade 5
     motor: 5
-    travel_steps: 14868
+    travel_steps: 9360
     hold: brake
     home_overrun: 150
 
@@ -267,18 +235,23 @@ number:
   - platform: autoshade_link
     cover_id: shade_1
     name: Shade 1 Length
+    steps_per_foot: ${steps_per_foot}
   - platform: autoshade_link
     cover_id: shade_2
     name: Shade 2 Length
+    steps_per_foot: ${steps_per_foot}
   - platform: autoshade_link
     cover_id: shade_3
     name: Shade 3 Length
+    steps_per_foot: ${steps_per_foot}
   - platform: autoshade_link
     cover_id: shade_4
     name: Shade 4 Length
+    steps_per_foot: ${steps_per_foot}
   - platform: autoshade_link
     cover_id: shade_5
     name: Shade 5 Length
+    steps_per_foot: ${steps_per_foot}
 
   - platform: template
     id: jog_in
@@ -294,6 +267,41 @@ number:
     optimistic: true
     restore_value: true
 
+  # Full steps/s for every shade, from the next move. The board half-steps,
+  # so the motor sees twice this. 150+ grinds; 90 is the tested sweet spot.
+  - platform: template
+    id: motor_speed
+    name: Motor Speed
+    entity_category: config
+    icon: mdi:speedometer
+    unit_of_measurement: steps/s
+    mode: slider
+    min_value: 25
+    max_value: 150
+    step: 5
+    initial_value: 90
+    optimistic: true
+    restore_value: true
+    on_value:
+      - lambda: 'id(avr)->set_all_speed((uint16_t) x);'
+
+  # Full steps/s^2. Lower = gentler start and stop, fewer lost steps.
+  - platform: template
+    id: motor_accel
+    name: Acceleration
+    entity_category: config
+    icon: mdi:gauge-fast
+    unit_of_measurement: steps/s²
+    mode: slider
+    min_value: 25
+    max_value: 400
+    step: 25
+    initial_value: 100
+    optimistic: true
+    restore_value: true
+    on_value:
+      - lambda: 'id(avr)->set_all_accel((uint16_t) x);'
+
 select:
   - platform: template
     id: setup_shade
@@ -307,6 +315,15 @@ select:
     restore_value: true
 
 button:
+  # Reflash the board's ATmega328P with the firmware bundled in this ESP image
+  # (see "Bundled Board Firmware"). Takes ~10 s. Refused while a shade moves.
+  - platform: template
+    name: Update Board Firmware
+    entity_category: diagnostic
+    icon: mdi:chip
+    on_press:
+      - lambda: 'id(avr)->start_avr_update();'
+
   # Prints the first 64 bytes of the board's EEPROM to the ESPHome log, where
   # the stock firmware kept its settings (shade drop lengths, etc.). Needs board
   # firmware 3.2. Diagnostic only, so it lives under the device's config section.
@@ -328,7 +345,7 @@ button:
     on_press:
       - lambda: |-
           auto *c = id(avr)->cover_at(id(setup_shade).active_index().value_or(0));
-          if (c) c->jog(-lroundf(id(jog_in).state * 2124.0f / 12.0f));
+          if (c) c->jog(-lroundf(id(jog_in).state * ${steps_per_inch}.0f));
 
   - platform: template
     name: Jog Down
@@ -337,7 +354,7 @@ button:
     on_press:
       - lambda: |-
           auto *c = id(avr)->cover_at(id(setup_shade).active_index().value_or(0));
-          if (c) c->jog(lroundf(id(jog_in).state * 2124.0f / 12.0f));
+          if (c) c->jog(lroundf(id(jog_in).state * ${steps_per_inch}.0f));
 
   - platform: template
     name: Set Top Here
@@ -356,6 +373,25 @@ button:
       - lambda: |-
           auto *c = id(avr)->cover_at(id(setup_shade).active_index().value_or(0));
           if (c) c->set_bottom_here();
+
+  # Tell the ESP where the selected shade physically is, without moving it.
+  - platform: template
+    name: Mark Selected Down
+    entity_category: config
+    icon: mdi:arrow-collapse-down
+    on_press:
+      - lambda: |-
+          auto *c = id(avr)->cover_at(id(setup_shade).active_index().value_or(0));
+          if (c) c->mark_position(0.0f);
+
+  - platform: template
+    name: Mark Selected Up
+    entity_category: config
+    icon: mdi:arrow-collapse-up
+    on_press:
+      - lambda: |-
+          auto *c = id(avr)->cover_at(id(setup_shade).active_index().value_or(0));
+          if (c) c->mark_position(1.0f);
 
   - platform: template
     name: Home Selected Shade
@@ -377,6 +413,25 @@ button:
           id(shade_3)->start_home();
           id(shade_4)->start_home();
           id(shade_5)->start_home();
+
+text_sensor:
+  - platform: template
+    name: Board Firmware
+    entity_category: diagnostic
+    icon: mdi:chip
+    update_interval: 5s
+    lambda: 'return id(avr)->board_version();'
+  - platform: template
+    name: Bundled Board Firmware
+    entity_category: diagnostic
+    icon: mdi:package-variant
+    update_interval: 60s
+    lambda: 'return id(avr)->bundled_version();'
+  - platform: template
+    name: Board Update Status
+    entity_category: diagnostic
+    update_interval: 2s
+    lambda: 'return id(avr)->avr_update_status();'
 
 interval:
   - interval: 2s
